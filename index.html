@@ -1231,6 +1231,7 @@ async function doLogin() {
 }
 
 async function initTeacher(email, userId) {
+  let creationError=null;
   try {
     const rows = await sbFetch(`teachers?email=eq.${encodeURIComponent(email)}&limit=1`);
     if (rows && rows.length) {
@@ -1242,7 +1243,26 @@ async function initTeacher(email, userId) {
           subject:'', role:'teacher', teacher_code:'TC'+Date.now()
         })});
         APP.teacherId = nr[0]?.id || userId; APP.teacherData = nr[0]||{};
-      } catch { APP.teacherId=userId; APP.teacherData={id:userId,email,full_name:email.split('@')[0]}; }
+      } catch(e) {
+        creationError=e.message||'Could not create teacher profile';
+        APP.teacherId=userId; APP.teacherData={id:userId,email,full_name:email.split('@')[0]};
+      }
+    }
+    // VERIFY: confirm a real row now exists in `teachers` for this id before allowing entry.
+    // Without this, classes/students/everything will fail later with a confusing foreign-key error.
+    try {
+      const verify = await sbFetch(`teachers?id=eq.${APP.teacherId}&limit=1`);
+      if (!verify || !verify.length) {
+        showMsg('loginErr', creationError
+          ? `Could not set up your teacher profile (${creationError}). Check the "teachers" table's Row Level Security policies in Supabase — authenticated users must be allowed to INSERT their own row.`
+          : 'Your teacher profile could not be verified. Please check Supabase RLS policies on the "teachers" table and try again.');
+        APP.token=null; APP.teacherId=null;
+        return false;
+      }
+    } catch(e) {
+      showMsg('loginErr','Could not verify teacher profile: '+e.message);
+      APP.token=null; APP.teacherId=null;
+      return false;
     }
     // Load user_settings
     try {
@@ -1250,8 +1270,10 @@ async function initTeacher(email, userId) {
       if (us && us.length && us[0].theme) applyTheme(us[0].theme);
       if (us && us.length && us[0].school_name) APP.teacherData.school_name = us[0].school_name;
     } catch {}
-  } catch {
-    APP.teacherId = userId; APP.teacherData = {id:userId,email,full_name:email.split('@')[0]};
+  } catch(e) {
+    showMsg('loginErr','Sign-in failed while loading your profile: '+e.message);
+    APP.token=null; APP.teacherId=null;
+    return false;
   }
   const tname = APP.teacherData?.full_name || email.split('@')[0];
   updateSbProfile(tname, email);
@@ -1260,6 +1282,7 @@ async function initTeacher(email, userId) {
   showApp();
   toast(`Welcome back, ${tname.split(' ')[0]}!`, 'success');
   loadNotifications();
+  return true;
 }
 
 async function doSignup() {
