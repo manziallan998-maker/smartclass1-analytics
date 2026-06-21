@@ -261,6 +261,7 @@ table.main-tbl tbody tr:hover{background:var(--bg-hover)}
 .qa-card span{font-size:12px;font-weight:600;color:var(--txt)}
 /* ANALYTICS CHARTS */
 .chart-card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r-lg);padding:18px;position:relative}
+@media(max-width:760px){.pred-cols{grid-template-columns:1fr !important}}
 .chart-card h4{font-size:13px;font-weight:700;margin-bottom:14px;color:var(--txt)}
 .charts-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 .chart-canvas-wrap{position:relative;height:220px}
@@ -646,7 +647,10 @@ table.main-tbl tbody tr:hover{background:var(--bg-hover)}
     <div class="page hidden" id="page-groups">
       <div class="section-head">
         <div><div class="section-title">Smart Groups</div><div class="section-sub">Organize students into custom study groups</div></div>
-        <button class="btn" id="newGroupBtn"><i class="fas fa-plus"></i> New Group</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn-sec" id="autoGroupBtn"><i class="fas fa-wand-magic-sparkles"></i> Auto-Generate</button>
+          <button class="btn" id="newGroupBtn"><i class="fas fa-plus"></i> New Group</button>
+        </div>
       </div>
       <div class="group-cards" id="groups-list"></div>
     </div>
@@ -661,6 +665,7 @@ table.main-tbl tbody tr:hover{background:var(--bg-hover)}
       </div></div>
       <div class="stats-grid" id="ana-summary-stats"></div>
       <div class="charts-grid" id="ana-charts-grid"></div>
+      <div id="ana-table-wrap"></div>
       <div id="ana-insights"></div>
     </div>
 
@@ -930,9 +935,40 @@ table.main-tbl tbody tr:hover{background:var(--bg-hover)}
     <div class="fg"><label>Group Name</label><input type="text" id="m-grpName" placeholder="e.g. Top Performers, Remedial Group"></div>
     <div class="fg"><label>Class</label><select id="m-grpClass"></select></div>
     <div class="fg"><label>Description</label><textarea id="m-grpDesc" placeholder="What is this group for?"></textarea></div>
+    <div class="fg"><label>Members</label><div id="m-grpMembers" style="max-height:200px;overflow:auto;border:1px solid var(--border);border-radius:var(--r-md);padding:8px"></div></div>
     <div class="modal-foot">
       <button class="btn" id="saveGroupBtn" style="flex:1"><i class="fas fa-check"></i> Create Group</button>
       <button class="btn-sec" onclick="closeModal('m-newGroup')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Auto-Generate Groups -->
+<div class="modal" id="m-autoGroup">
+  <div class="modal-box">
+    <div class="modal-head"><h3><i class="fas fa-wand-magic-sparkles"></i>Auto-Generate Groups</h3><button class="modal-close" onclick="closeModal('m-autoGroup')">&times;</button></div>
+    <div class="fg"><label>Class</label><select id="ag-class"></select></div>
+    <div class="fg"><label>Strategy</label><select id="ag-strategy">
+      <option value="balanced">Balanced — mix high/mid/low performers evenly</option>
+      <option value="bestTogether">Best Together — group similar-ability students</option>
+      <option value="random">Random — shuffle students</option>
+    </select></div>
+    <div class="fg"><label>Number of Groups</label><input type="number" id="ag-count" min="2" max="20" value="4"></div>
+    <div class="fg"><label>Name Prefix</label><input type="text" id="ag-prefix" value="Group" placeholder="e.g. Group, Team, Squad"></div>
+    <div class="modal-foot">
+      <button class="btn" id="ag-runBtn" style="flex:1"><i class="fas fa-bolt"></i> Generate Groups</button>
+      <button class="btn-sec" onclick="closeModal('m-autoGroup')">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- View Group Members -->
+<div class="modal" id="m-viewGroup">
+  <div class="modal-box">
+    <div class="modal-head"><h3 id="vg-title"><i class="fas fa-users"></i>Group</h3><button class="modal-close" onclick="closeModal('m-viewGroup')">&times;</button></div>
+    <div id="vg-body" style="max-height:340px;overflow:auto"></div>
+    <div class="modal-foot">
+      <button class="btn-sec" onclick="closeModal('m-viewGroup')" style="flex:1">Close</button>
     </div>
   </div>
 </div>
@@ -1394,13 +1430,24 @@ async function renderClasses() {
     list.innerHTML='<div class="empty" style="grid-column:1/-1"><i class="fas fa-book-open"></i><p>No classes yet — create your first class</p></div>';
     $i('class-details').style.display='none'; return;
   }
+  list.innerHTML=APP.classes.map(()=>`<div class="class-card" style="opacity:.5"><div class="cc-stripe"></div><div class="cc-name"><i class="fas fa-spinner fa-spin"></i></div></div>`).join('');
+  // Fetch real student count + average for every class up front (not just the selected one)
+  await Promise.all(APP.classes.map(async c=>{
+    try {
+      const [stus,cols]=await Promise.all([sbFetch(`students?class_id=eq.${c.id}&select=id,scores`),loadColsFromDB(c.id)]);
+      const s=stus||[];
+      const avgs=s.map(st=>calcAvg(st,cols)).filter(v=>v!=null);
+      c._count=s.length;
+      c._avg=avgs.length?+(avgs.reduce((a,b)=>a+b,0)/avgs.length).toFixed(1):0;
+    } catch { c._count=c._count||0; c._avg=c._avg||0; }
+  }));
   list.innerHTML = APP.classes.map(c=>{
     const avg=c._avg||0; const pill=avg>=70?'good':avg>=50?'mid':'low';
     return `<div class="class-card${APP.currentClassId===c.id?' sel':''}" data-id="${c.id}">
       <div class="cc-stripe"></div>
       <div class="cc-name">${esc(c.class_name)}</div>
       <div class="cc-meta"><span><i class="fas fa-users"></i>${c._count||0}</span><span><i class="fas fa-calendar-days"></i>${esc(c.academic_year||'—')}</span></div>
-      <div class="cc-avg ${pill}">${avg>0?avg.toFixed(1)+'%':'No data'}</div>
+      <div class="cc-avg ${pill}">${(c._count>0)?(avg>0?avg.toFixed(1)+'%':'No marks yet'):'No students'}</div>
     </div>`;
   }).join('');
   document.querySelectorAll('.class-card').forEach(card=>card.addEventListener('click',()=>selectClass(card.dataset.id)));
@@ -1903,6 +1950,7 @@ async function renderAnalytics() {
 async function buildAnalytics(filterClassId) {
   $i('ana-summary-stats').innerHTML='<div style="color:var(--txt3);font-size:12.5px;grid-column:1/-1"><i class="fas fa-spinner fa-spin"></i> Loading analytics…</div>';
   $i('ana-charts-grid').innerHTML='';
+  $i('ana-table-wrap').innerHTML='';
   $i('ana-insights').innerHTML='';
 
   // Destroy existing charts
@@ -1954,7 +2002,8 @@ async function buildAnalytics(filterClassId) {
     <div class="chart-card"><h4><i class="fas fa-chart-bar" style="color:var(--acc);margin-right:6px"></i>Class Average Comparison</h4><div class="chart-canvas-wrap"><canvas id="c-avgbar"></canvas></div></div>
     <div class="chart-card"><h4><i class="fas fa-chart-pie" style="color:var(--purple);margin-right:6px"></i>Grade Distribution</h4><div class="chart-canvas-wrap"><canvas id="c-grades"></canvas></div></div>
     <div class="chart-card"><h4><i class="fas fa-trophy" style="color:var(--yellow);margin-right:6px"></i>Top 10 Students</h4><div class="chart-canvas-wrap"><canvas id="c-top10"></canvas></div></div>
-    <div class="chart-card"><h4><i class="fas fa-chart-column" style="color:var(--green);margin-right:6px"></i>Pass vs Fail by Class</h4><div class="chart-canvas-wrap"><canvas id="c-passfail"></canvas></div></div>`;
+    <div class="chart-card"><h4><i class="fas fa-chart-column" style="color:var(--green);margin-right:6px"></i>Pass vs Fail by Class</h4><div class="chart-canvas-wrap"><canvas id="c-passfail"></canvas></div></div>
+    <div class="chart-card"><h4><i class="fas fa-bullseye" style="color:var(--blue);margin-right:6px"></i>Class Comparison (Multi-Metric)</h4><div class="chart-canvas-wrap"><canvas id="c-radar"></canvas></div></div>`;
   $i('ana-charts-grid').innerHTML=chartsHTML;
 
   const baseChartOpts=(title)=>({
@@ -2005,6 +2054,75 @@ async function buildAnalytics(filterClassId) {
         {label:'No Marks',data:clsInfo.map(c=>c.total-c.hasMarks),backgroundColor:'rgba(102,102,102,.5)',borderWidth:0}
       ]
     },options:{...baseChartOpts(),...{scales:{x:{stacked:true,ticks:{color:fontColor,font:{size:10}},grid:{color:gridColor}},y:{stacked:true,ticks:{color:fontColor,font:{size:10}},grid:{color:gridColor}}}}}});
+  }
+
+  // Chart 5: Radar — multi-metric class comparison (top 4 classes)
+  if ($i('c-radar')) {
+    const radarSet=clsInfo.filter(c=>c.avg!=null).slice(0,4);
+    APP.chartInstances.radar=new Chart($i('c-radar'),{type:'radar',data:{
+      labels:['Avg Score','Pass Rate','% Grade A','Top Score','Retention'],
+      datasets:radarSet.map((c,i)=>{
+        const top=c.allAvgs.length?Math.max(...c.allAvgs):0;
+        const passRate=c.hasMarks?Math.round(c.passing/c.hasMarks*100):0;
+        const pctA=c.hasMarks?Math.round(c.grades.A/c.hasMarks*100):0;
+        const retention=c.total?Math.round((c.total-c.grades['-'])/c.total*100):0;
+        return {label:c.cls.class_name,data:[c.avg.toFixed(1),passRate,pctA,top.toFixed(0),retention],
+          borderColor:chartColors[i%chartColors.length],backgroundColor:chartColors[i%chartColors.length]+'22',
+          pointBackgroundColor:chartColors[i%chartColors.length],pointBorderColor:'#fff',pointRadius:3,borderWidth:1.5};
+      })
+    },options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{position:'bottom',labels:{color:fontColor,font:{size:10},boxWidth:8}}},
+      scales:{r:{min:0,max:100,grid:{color:gridColor},angleLines:{color:gridColor},
+        ticks:{color:fontColor,backdropColor:'transparent',font:{size:9},stepSize:20},
+        pointLabels:{color:fontColor,font:{size:10}}}}}});
+  }
+
+  // CLASS COMPARISON TABLE
+  const tblWrap=$i('ana-table-wrap');
+  if (tblWrap) {
+    tblWrap.innerHTML=`
+    <div style="display:flex;justify-content:space-between;align-items:center;margin:18px 0 10px">
+      <div class="section-title" style="font-size:13.5px"><i class="fas fa-table" style="color:var(--acc);margin-right:7px"></i>Class Comparison Table</div>
+      <button class="btn-sec" id="ana-export-csv" style="padding:6px 12px;font-size:11.5px"><i class="fas fa-download"></i> Export CSV</button>
+    </div>
+    <div style="overflow-x:auto;border:1px solid var(--border);border-radius:var(--r-lg)">
+      <table style="width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap">
+        <thead><tr style="background:var(--bg-2);text-align:left">
+          ${['Class','Students','Avg','Highest','Lowest','Pass Rate','A','B','C','D','E'].map(h=>`<th style="padding:9px 12px;font-weight:700;color:var(--txt3);font-size:10.5px;text-transform:uppercase;letter-spacing:.3px">${h}</th>`).join('')}
+        </tr></thead>
+        <tbody>${clsInfo.map(c=>{
+          const top=c.allAvgs.length?Math.max(...c.allAvgs).toFixed(0):'—';
+          const low=c.allAvgs.length?Math.min(...c.allAvgs).toFixed(0):'—';
+          const passRate=c.hasMarks?Math.round(c.passing/c.hasMarks*100):0;
+          return `<tr style="border-top:1px solid var(--border)">
+            <td style="padding:9px 12px;font-weight:600">${esc(c.cls.class_name)}</td>
+            <td style="padding:9px 12px">${c.total}</td>
+            <td style="padding:9px 12px"><span style="font-family:'JetBrains Mono',monospace;font-weight:700;color:${c.avg!=null?scoreColorFromPct(c.avg):'var(--txt3)'}">${c.avg!=null?c.avg.toFixed(1)+'%':'—'}</span></td>
+            <td style="padding:9px 12px">${top}${top!=='—'?'%':''}</td>
+            <td style="padding:9px 12px">${low}${low!=='—'?'%':''}</td>
+            <td style="padding:9px 12px">${passRate}%</td>
+            <td style="padding:9px 12px;color:#10B981;font-weight:600">${c.grades.A||0}</td>
+            <td style="padding:9px 12px;color:#3B82F6;font-weight:600">${c.grades.B||0}</td>
+            <td style="padding:9px 12px;color:#F59E0B;font-weight:600">${c.grades.C||0}</td>
+            <td style="padding:9px 12px;color:#FF6600;font-weight:600">${c.grades.D||0}</td>
+            <td style="padding:9px 12px;color:#EF4444;font-weight:600">${c.grades.E||0}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+    </div>`;
+    $i('ana-export-csv').onclick=()=>{
+      let csv='Class,Students,Avg,Highest,Lowest,PassRate,A,B,C,D,E\n';
+      clsInfo.forEach(c=>{
+        const top=c.allAvgs.length?Math.max(...c.allAvgs).toFixed(0):'';
+        const low=c.allAvgs.length?Math.min(...c.allAvgs).toFixed(0):'';
+        const passRate=c.hasMarks?Math.round(c.passing/c.hasMarks*100):0;
+        csv+=`"${c.cls.class_name}",${c.total},${c.avg!=null?c.avg.toFixed(1):''}%,${top}%,${low}%,${passRate}%,${c.grades.A||0},${c.grades.B||0},${c.grades.C||0},${c.grades.D||0},${c.grades.E||0}\n`;
+      });
+      const blob=new Blob([csv],{type:'text/csv'});
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(blob); a.download=`smartclass_analytics_${new Date().toISOString().split('T')[0]}.csv`; a.click();
+      toast('Analytics exported','success');
+    };
   }
 
   // INSIGHTS
@@ -2060,27 +2178,68 @@ $i('runPredBtn').addEventListener('click',async()=>{
       return {...s,avg,trend,trendVal,riskLabel,riskCls,risk};
     }).sort((a,b)=>a.avg-b.avg);
     const high=withRisk.filter(s=>s.risk==='high').length, med=withRisk.filter(s=>s.risk==='medium').length, low=withRisk.filter(s=>s.risk==='low').length;
-    results.innerHTML=`
-      <div class="stats-grid" style="margin-bottom:13px">
+    const atRisk=withRisk.filter(s=>s.risk==='high'||s.risk==='medium').map(s=>({...s,
+      predictedNext:Math.max(0,+(s.avg+(s.trendVal<0?s.trendVal*0.6:-3)).toFixed(1)),
+      confidence:Math.min(96,Math.round(55+Math.abs(s.trendVal)+(s.risk==='high'?15:5)))
+    })).sort((a,b)=>a.avg-b.avg);
+    const improving=withRisk.filter(s=>s.trend==='improving'&&s.avg>=50).map(s=>({...s,
+      predictedNext:Math.min(100,+(s.avg+s.trendVal*0.6).toFixed(1)),
+      confidence:Math.min(94,Math.round(50+s.trendVal))
+    })).sort((a,b)=>b.trendVal-a.trendVal);
+    const recs=[];
+    if (atRisk.length) recs.push(`<i class="fas fa-chalkboard"></i> Focus extra tutoring on ${atRisk.length} at-risk student${atRisk.length>1?'s':''}`);
+    if (high>0) recs.push(`<i class="fas fa-calendar"></i> Schedule parent meetings for students who dropped more than 15% in recent assessments`);
+    const lowCols=cols.filter(c=>{ const vals=withRisk.map(s=>s.scores?.[c.column_name]!=null?(s.scores[c.column_name]/c.max_score*100):null).filter(v=>v!=null); const a=vals.length?vals.reduce((x,y)=>x+y,0)/vals.length:null; return a!=null&&a<60; });
+    if (lowCols.length) recs.push(`<i class="fas fa-book"></i> Review topic(s) for "${lowCols.map(c=>c.column_name).join('", "')}" — class average below 60%`);
+    recs.push(`<i class="fas fa-chart-line"></i> Track improvement after each assessment to adjust teaching strategy`);
+    if (!recs.length) recs.push(`<i class="fas fa-circle-check"></i> No concerns detected — class performing well overall`);
+    const pillRow=`<div class="stats-grid" style="margin-bottom:13px">
         <div class="stat-card"><div class="stat-icon ic-red"><i class="fas fa-circle-xmark"></i></div><div class="stat-label">High Risk</div><div class="stat-val c-red">${high}</div></div>
         <div class="stat-card"><div class="stat-icon" style="background:rgba(245,158,11,.12)"><i class="fas fa-triangle-exclamation" style="color:var(--yellow)"></i></div><div class="stat-label">At Risk</div><div class="stat-val" style="color:var(--yellow)">${med}</div></div>
         <div class="stat-card"><div class="stat-icon ic-green"><i class="fas fa-circle-check"></i></div><div class="stat-label">On Track</div><div class="stat-val c-green">${low}</div></div>
+        <div class="stat-card"><div class="stat-icon" style="background:rgba(99,102,241,.12)"><i class="fas fa-arrow-trend-up" style="color:var(--purple)"></i></div><div class="stat-label">Improving</div><div class="stat-val" style="color:var(--purple)">${improving.length}</div></div>
+      </div>`;
+    const predRow=(s,kind)=>{
+      const ini=(s.full_name||'?').split(' ').map(n=>n[0]).slice(0,2).join('').toUpperCase();
+      const arrowColor=kind==='risk'?'var(--red)':'var(--green)';
+      return `<div class="pred-item">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="stu-av">${ini}</div>
+          <div><span style="font-weight:600;font-size:13px">${esc(s.full_name)}</span><br><span style="font-size:11px;color:var(--txt3)">${s.avg.toFixed(1)}% <i class="fas fa-arrow-right" style="margin:0 3px;color:${arrowColor}"></i> <span style="color:${arrowColor};font-weight:700">${s.predictedNext}%</span> predicted</span></div>
+        </div>
+        <div style="text-align:right;min-width:110px">
+          <div class="confidence-bar" style="height:5px;border-radius:4px;background:var(--bg-3);overflow:hidden;margin-bottom:3px"><div style="height:100%;width:${s.confidence}%;background:${arrowColor};border-radius:4px"></div></div>
+          <span style="font-size:10.5px;color:var(--txt3)">${s.confidence}% confidence</span>
+        </div>
+      </div>`;
+    };
+    results.innerHTML=`${pillRow}
+      <div style="padding:10px 13px;background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.18);border-radius:var(--r-md);font-size:12.5px;margin-bottom:14px;color:var(--txt2)">
+        <strong style="display:block;margin-bottom:5px"><i class="fas fa-lightbulb" style="color:var(--yellow);margin-right:6px"></i>AI Recommendations</strong>
+        <ul style="margin:0;padding-left:18px;line-height:1.9">${recs.map(r=>`<li>${r}</li>`).join('')}</ul>
       </div>
-      ${high>0?`<div style="padding:10px 13px;background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.2);border-radius:var(--r-md);font-size:12.5px;margin-bottom:12px;color:var(--txt2)"><i class="fas fa-lightbulb" style="color:var(--yellow);margin-right:6px"></i><strong>Recommendation:</strong> ${high} student${high>1?'s need':'needs'} immediate attention. Consider scheduling parent meetings and extra support sessions.</div>`:''}
-      ${withRisk.map(s=>{
-        const ini=(s.full_name||'?').split(' ').map(n=>n[0]).slice(0,2).join('').toUpperCase();
-        const trendIcon=s.trend==='improving'?`<span style="color:var(--green);font-size:11px"><i class="fas fa-arrow-trend-up"></i> +${s.trendVal.toFixed(0)}%</span>`:s.trend==='declining'?`<span style="color:var(--red);font-size:11px"><i class="fas fa-arrow-trend-down"></i> ${s.trendVal.toFixed(0)}%</span>`:'<span style="color:var(--txt3);font-size:11px">Stable</span>';
-        return `<div class="pred-item">
-          <div style="display:flex;align-items:center;gap:10px">
-            <div class="stu-av">${ini}</div>
-            <div><span style="font-weight:600;font-size:13px">${esc(s.full_name)}</span><br>${trendIcon}</div>
-          </div>
-          <div style="display:flex;align-items:center;gap:10px">
-            <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:${scoreColorFromPct(s.avg)}">${s.avg.toFixed(1)}%</span>
-            <span class="risk-pill ${s.riskCls}">${s.riskLabel}</span>
-          </div>
-        </div>`;
-      }).join('')}`;
+      <div class="chart-card" style="margin-bottom:14px"><h4><i class="fas fa-chart-line" style="color:var(--acc);margin-right:6px"></i>Current vs Predicted (Top Movers)</h4><div class="chart-canvas-wrap"><canvas id="c-predchart"></canvas></div></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px" class="pred-cols">
+        <div>
+          <h4 style="font-size:12.5px;font-weight:700;color:var(--red);margin-bottom:8px"><i class="fas fa-triangle-exclamation"></i> At Risk (${atRisk.length})</h4>
+          ${atRisk.length?atRisk.map(s=>predRow(s,'risk')).join(''):'<div class="empty" style="padding:20px"><p>✅ No at-risk students</p></div>'}
+        </div>
+        <div>
+          <h4 style="font-size:12.5px;font-weight:700;color:var(--green);margin-bottom:8px"><i class="fas fa-arrow-trend-up"></i> Improving (${improving.length})</h4>
+          ${improving.length?improving.map(s=>predRow(s,'improve')).join(''):'<div class="empty" style="padding:20px"><p>📈 No improving trend detected yet</p></div>'}
+        </div>
+      </div>`;
+    const movers=[...atRisk.slice(0,5),...improving.slice(0,5)];
+    if (movers.length) {
+      if (APP.chartInstances?.predchart) APP.chartInstances.predchart.destroy();
+      APP.chartInstances=APP.chartInstances||{};
+      APP.chartInstances.predchart=new Chart($i('c-predchart'),{type:'bar',data:{
+        labels:movers.map(s=>s.full_name.length>14?s.full_name.slice(0,12)+'…':s.full_name),
+        datasets:[
+          {label:'Current',data:movers.map(s=>+s.avg.toFixed(1)),backgroundColor:'rgba(99,102,241,.55)',borderRadius:5},
+          {label:'Predicted Next',data:movers.map(s=>s.predictedNext),backgroundColor:movers.map(s=>s.predictedNext>=s.avg?'rgba(16,185,129,.75)':'rgba(239,68,68,.75)'),borderRadius:5}
+        ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{boxWidth:10,font:{size:11}}}},scales:{y:{beginAtZero:true,max:100}}}});
+    }
     if (high>0) createNotification(`⚠ Risk Alert: ${high} students failing`,`${high} students in ${APP.classes.find(c=>c.id===classId)?.class_name||'class'} are at high risk (below 40%).`,'warning','predict');
   } catch(e) { results.innerHTML=`<div style="color:var(--red);padding:20px">Error: ${e.message}</div>`; }
 });
@@ -2122,7 +2281,7 @@ async function buildLeaderboard(classId) {
 }
 
 /* ═══════════════════════════════════════════════════════
-   GROUPS
+   GROUPS — full member management + auto-generation
 ═══════════════════════════════════════════════════════ */
 async function renderGroups() {
   await loadClasses();
@@ -2130,35 +2289,148 @@ async function renderGroups() {
   let groups=[];
   try { groups=await sbFetch(`groups?teacher_id=eq.${APP.teacherId}&order=created_at.desc`)||[]; } catch {}
   const gc=$i('groups-list');
-  if (!groups.length) { gc.innerHTML='<div class="empty" style="grid-column:1/-1"><i class="fas fa-users"></i><p>No groups yet</p></div>'; return; }
-  gc.innerHTML=groups.map(g=>`
+  if (!groups.length) { gc.innerHTML='<div class="empty" style="grid-column:1/-1"><i class="fas fa-users"></i><p>No groups yet — try Auto-Generate or create one manually</p></div>'; return; }
+  gc.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:14px;color:var(--txt3)"><i class="fas fa-spinner fa-spin"></i></div>';
+  let members=[];
+  try { members=await sbFetch(`group_members?group_id=in.(${groups.map(g=>g.id).join(',')})`)||[]; } catch {}
+  gc.innerHTML=groups.map(g=>{
+    const mine=members.filter(m=>m.group_id===g.id);
+    const capId=mine.find(m=>m.is_captain)?.student_id;
+    return `
     <div class="group-card">
       <div style="display:flex;justify-content:space-between;align-items:flex-start">
         <div>
           <div class="group-name">${esc(g.group_name)}</div>
           <div class="group-meta">${esc(APP.classes.find(c=>c.id===g.class_id)?.class_name||'—')} · ${esc(g.description||'No description')}</div>
         </div>
-        <button class="ib del" onclick="deleteGroup('${g.id}')"><i class="fas fa-trash"></i></button>
+        <div style="display:flex;gap:4px">
+          <button class="ib" onclick="viewGroup('${g.id}')" title="View members"><i class="fas fa-eye"></i></button>
+          <button class="ib del" onclick="deleteGroup('${g.id}')"><i class="fas fa-trash"></i></button>
+        </div>
       </div>
-    </div>`).join('');
+      <div style="margin-top:9px;font-size:11.5px;color:var(--txt3)"><i class="fas fa-user-group"></i> ${mine.length} member${mine.length!==1?'s':''}${capId?' · 👑 Captain assigned':''}</div>
+    </div>`;
+  }).join('');
 }
+window.viewGroup=async gid=>{
+  try {
+    const [g,members]=await Promise.all([sbFetch(`groups?id=eq.${gid}`),sbFetch(`group_members?group_id=eq.${gid}`)]);
+    const grp=g?.[0]; if (!grp) return;
+    await loadClasses();
+    const stus=await sbFetch(`students?class_id=eq.${grp.class_id}`)||[];
+    $i('vg-title').innerHTML=`<i class="fas fa-users"></i>${esc(grp.group_name)}`;
+    $i('vg-body').innerHTML=(members||[]).length?(members||[]).map(m=>{
+      const s=stus.find(x=>x.id===m.student_id);
+      return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 4px;border-bottom:1px solid var(--border)">
+        <span>${m.is_captain?'👑 ':''}${esc(s?.full_name||'Unknown student')}</span>
+        ${!m.is_captain?`<button class="btn-sec" style="padding:4px 9px;font-size:11px" onclick="setCaptain('${gid}','${m.student_id}')">Make Captain</button>`:'<span style="font-size:11px;color:var(--yellow);font-weight:600">CAPTAIN</span>'}
+      </div>`;
+    }).join(''):'<div class="empty"><p>No members yet</p></div>';
+    openModal('m-viewGroup');
+  } catch(e) { toast('Error: '+e.message,'error'); }
+};
+window.setCaptain=async(gid,stuId)=>{
+  try {
+    await sbFetch(`group_members?group_id=eq.${gid}`,{method:'PATCH',body:JSON.stringify({is_captain:false})});
+    await sbFetch(`group_members?group_id=eq.${gid}&student_id=eq.${stuId}`,{method:'PATCH',body:JSON.stringify({is_captain:true})});
+    toast('Captain assigned','success'); viewGroup(gid); renderGroups();
+  } catch(e) { toast('Error: '+e.message,'error'); }
+};
 $i('newGroupBtn').addEventListener('click',async()=>{
   await loadClasses();
   $i('m-grpClass').innerHTML=APP.classes.map(c=>`<option value="${c.id}">${esc(c.class_name)}</option>`).join('');
-  $i('m-grpName').value=''; $i('m-grpDesc').value=''; openModal('m-newGroup');
+  $i('m-grpName').value=''; $i('m-grpDesc').value='';
+  await renderMemberPicker($i('m-grpClass').value);
+  openModal('m-newGroup');
 });
+$i('m-grpClass').addEventListener('change',e=>renderMemberPicker(e.target.value));
+async function renderMemberPicker(classId) {
+  const box=$i('m-grpMembers');
+  if (!classId) { box.innerHTML='<div style="color:var(--txt3);font-size:12px">Select a class first</div>'; return; }
+  box.innerHTML='<div style="color:var(--txt3);font-size:12px"><i class="fas fa-spinner fa-spin"></i></div>';
+  const stus=await sbFetch(`students?class_id=eq.${classId}&order=full_name.asc`)||[];
+  box.innerHTML=stus.length?stus.map(s=>`<label style="display:flex;align-items:center;gap:7px;padding:5px 2px;font-size:12.5px;cursor:pointer">
+    <input type="checkbox" class="grp-mem-chk" value="${s.id}"> ${esc(s.full_name)}
+  </label>`).join(''):'<div style="color:var(--txt3);font-size:12px">No students in this class</div>';
+}
 $i('saveGroupBtn').addEventListener('click',async()=>{
   const name=$i('m-grpName').value.trim();
   if (!name) { toast('Group name required','warn'); return; }
+  const classId=$i('m-grpClass').value;
+  const memberIds=[...document.querySelectorAll('.grp-mem-chk:checked')].map(c=>c.value);
+  setBtn('saveGroupBtn',true,'Creating…');
   try {
-    await sbFetch('groups',{method:'POST',body:JSON.stringify({teacher_id:APP.teacherId,class_id:$i('m-grpClass').value,group_name:name,description:$i('m-grpDesc').value})});
+    const created=await sbFetch('groups',{method:'POST',body:JSON.stringify({teacher_id:APP.teacherId,class_id:classId,group_name:name,description:$i('m-grpDesc').value}),headers:{'Prefer':'return=representation'}});
+    const gid=created?.[0]?.id;
+    if (gid && memberIds.length) {
+      await sbFetch('group_members',{method:'POST',body:JSON.stringify(memberIds.map(sid=>({group_id:gid,student_id:sid,is_captain:false})))});
+    }
     closeModal('m-newGroup'); await renderGroups(); toast('Group created','success');
   } catch(e) { toast('Error: '+e.message,'error'); }
+  finally { setBtn('saveGroupBtn',false,'<i class="fas fa-check"></i> Create Group'); }
 });
-window.deleteGroup=gid=>confirm2('Delete Group','Remove this group? Students are not affected.',async()=>{
-  try { await sbFetch(`groups?id=eq.${gid}`,{method:'DELETE',headers:{'Prefer':''}}); await renderGroups(); toast('Group deleted','warn'); }
-  catch(e){toast('Error: '+e.message,'error');}
+window.deleteGroup=gid=>confirm2('Delete Group','Remove this group and its member list? Students are not affected.',async()=>{
+  try {
+    await sbFetch(`group_members?group_id=eq.${gid}`,{method:'DELETE',headers:{'Prefer':''}}).catch(()=>{});
+    await sbFetch(`groups?id=eq.${gid}`,{method:'DELETE',headers:{'Prefer':''}});
+    await renderGroups(); toast('Group deleted','warn');
+  } catch(e){toast('Error: '+e.message,'error');}
 },'Delete');
+
+/* Auto-Generate Groups by strategy */
+$i('autoGroupBtn').addEventListener('click',async()=>{
+  await loadClasses();
+  $i('ag-class').innerHTML=APP.classes.map(c=>`<option value="${c.id}">${esc(c.class_name)}</option>`).join('');
+  openModal('m-autoGroup');
+});
+$i('ag-runBtn').addEventListener('click',async()=>{
+  const classId=$i('ag-class').value, strategy=$i('ag-strategy').value, count=Math.max(2,+$i('ag-count').value||4), prefix=($i('ag-prefix').value||'Group').trim();
+  if (!classId) { toast('Select a class','warn'); return; }
+  setBtn('ag-runBtn',true,'Generating…');
+  try {
+    const [stus,cols]=await Promise.all([sbFetch(`students?class_id=eq.${classId}`),loadColsFromDB(classId)]);
+    if (!stus||stus.length<2) { toast('Need at least 2 students in this class','warn'); setBtn('ag-runBtn',false,'<i class="fas fa-bolt"></i> Generate Groups'); return; }
+    const ranked=stus.map(s=>({...s,_avg:calcAvg(s,cols)||0}));
+    let buckets=Array.from({length:count},()=>[]);
+    if (strategy==='random') {
+      const shuffled=[...ranked].sort(()=>Math.random()-0.5);
+      shuffled.forEach((s,i)=>buckets[i%count].push(s));
+    } else if (strategy==='bestTogether') {
+      ranked.sort((a,b)=>b._avg-a._avg);
+      const perGroup=Math.ceil(ranked.length/count);
+      ranked.forEach((s,i)=>buckets[Math.min(Math.floor(i/perGroup),count-1)].push(s));
+    } else { // balanced — snake draft so each group gets a spread of abilities
+      ranked.sort((a,b)=>b._avg-a._avg);
+      let dir=1, idx=0;
+      for (const s of ranked) {
+        buckets[idx].push(s);
+        idx+=dir;
+        if (idx===count) { idx=count-1; dir=-1; }
+        else if (idx<0) { idx=0; dir=1; }
+      }
+    }
+    // wipe previous auto-groups with same prefix for this class to avoid duplicates
+    const existing=await sbFetch(`groups?teacher_id=eq.${APP.teacherId}&class_id=eq.${classId}&group_name=like.${encodeURIComponent(prefix)}*`)||[];
+    for (const g of existing) {
+      await sbFetch(`group_members?group_id=eq.${g.id}`,{method:'DELETE',headers:{'Prefer':''}}).catch(()=>{});
+      await sbFetch(`groups?id=eq.${g.id}`,{method:'DELETE',headers:{'Prefer':''}}).catch(()=>{});
+    }
+    for (let i=0;i<buckets.length;i++) {
+      if (!buckets[i].length) continue;
+      const avg=(buckets[i].reduce((a,s)=>a+s._avg,0)/buckets[i].length).toFixed(1);
+      const created=await sbFetch('groups',{method:'POST',body:JSON.stringify({teacher_id:APP.teacherId,class_id:classId,group_name:`${prefix} ${i+1}`,description:`Auto-generated (${strategy}) · avg ${avg}%`}),headers:{'Prefer':'return=representation'}});
+      const gid=created?.[0]?.id;
+      if (gid) {
+        const captain=buckets[i].reduce((a,b)=>b._avg>a._avg?b:a,buckets[i][0]);
+        await sbFetch('group_members',{method:'POST',body:JSON.stringify(buckets[i].map(s=>({group_id:gid,student_id:s.id,is_captain:s.id===captain.id})))});
+      }
+    }
+    closeModal('m-autoGroup'); await renderGroups();
+    toast(`${buckets.filter(b=>b.length).length} groups generated`,'success');
+    createNotification('Groups Generated',`${buckets.filter(b=>b.length).length} ${strategy} groups created for ${APP.classes.find(c=>c.id===classId)?.class_name||'class'}.`,'success','groups');
+  } catch(e) { toast('Error: '+e.message,'error'); }
+  finally { setBtn('ag-runBtn',false,'<i class="fas fa-bolt"></i> Generate Groups'); }
+});
 
 /* ═══════════════════════════════════════════════════════
    LESSON PLANNER — SUPABASE lesson_plans table
