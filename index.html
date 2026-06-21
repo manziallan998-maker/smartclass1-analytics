@@ -1025,6 +1025,7 @@ table.main-tbl tbody tr:hover{background:var(--bg-hover)}
 const SB_URL = 'https://nemuhcjnuaszcbvhlbhz.supabase.co';
 const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5lbXVoY2pudWFzemNidmhsYmh6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEwMTcxMzMsImV4cCI6MjA5NjU5MzEzM30.3I2ssXz4_g5qzQvwEf11vXSo1g63YEw-vdnZpjmOatQ';
 
+// CHANGE 1: sbFetch — capture Postgres error codes
 async function sbFetch(path, opts = {}) {
   const method = opts.method || 'GET';
   const headers = {
@@ -1043,7 +1044,10 @@ async function sbFetch(path, opts = {}) {
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.message || err.hint || res.statusText);
+    const e = new Error(err.message || err.hint || res.statusText);
+    e.code = err.code || null;
+    e.details = err.details || null;
+    throw e;
   }
   return res.status === 204 ? null : res.json();
 }
@@ -1055,6 +1059,37 @@ async function sbAuth(path, body) {
     body: JSON.stringify(body)
   });
   return res.json();
+}
+
+// CHANGE 2: Add ensureTeacherProfile function after sbAuth
+async function ensureTeacherProfile(fullName, schoolName, subject) {
+  if (!APP.token) throw new Error('Not authenticated');
+  const res = await fetch(SB_URL + '/rest/v1/rpc/ensure_teacher_profile', {
+    method: 'POST',
+    headers: {
+      'apikey': SB_KEY,
+      'Authorization': 'Bearer ' + APP.token,
+      'Content-Type': 'application/json',
+      'Prefer': 'return=representation'
+    },
+    body: JSON.stringify({
+      p_full_name: fullName || null,
+      p_school_name: schoolName || null,
+      p_subject: subject || null
+    })
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const e = new Error(err.message || err.hint || res.statusText);
+    e.code = err.code || null;
+    e.details = err.details || null;
+    throw e;
+  }
+  const data = await res.json();
+  // The RPC returns either an object or a one-element array; handle both
+  if (Array.isArray(data) && data.length > 0) return data[0];
+  if (data && typeof data === 'object') return data;
+  throw new Error('Unexpected response from ensure_teacher_profile');
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -1114,7 +1149,7 @@ function isValidName(str) {
   if (letterCount < 2) return false;
   const nonPrint = (s.match(/[\x00-\x1F\x7F-\x9F]/g) || []).length;
   if (nonPrint / s.length > 0.1) return false;
-  if (/<[^>]+>/.test(s) || s.includes('docProps') || s.includes('\\u00')) return false;
+  if (/<[^>]+>/.test(s) || s.includes('docProps') || s.includes('\\u00')) return true;
   return true;
 }
 
@@ -1210,6 +1245,7 @@ window.goPage = goPage;
 /* ═══════════════════════════════════════════════════════
    AUTH
 ═══════════════════════════════════════════════════════ */
+// CHANGE 3: Rewrite doLogin
 async function doLogin() {
   const email = $i('loginEmail').value.trim(), pass = $i('loginPass').value;
   if (!email||!pass) { showMsg('loginErr','Email and password are required'); return; }
@@ -1219,9 +1255,12 @@ async function doLogin() {
     const data = await sbAuth('token?grant_type=password', {email, password:pass});
     if (data.access_token) {
       APP.token = data.access_token; APP.user = data.user;
-      await initTeacher(email, data.user.id);
-      // Update last_login
-      try { await sbFetch(`teachers?id=eq.${APP.teacherId}`, {method:'PATCH',body:JSON.stringify({last_login:new Date().toISOString()})}); } catch {}
+      const ok = await initTeacher(email, data.user.id);
+      if (ok) {
+        // Update last_login
+        try { await sbFetch(`teachers?id=eq.${APP.teacherId}`, {method:'PATCH',body:JSON.stringify({last_login:new Date().toISOString()})}); } catch {}
+      }
+      // if initTeacher returned false, it already cleared token and showed error
     } else {
       showMsg('loginErr', data.error_description || data.msg || 'Invalid email or password');
     }
@@ -1230,61 +1269,62 @@ async function doLogin() {
   } finally { btn.innerHTML='<i class="fas fa-sign-in-alt"></i> Sign In'; btn.disabled=false; }
 }
 
+// CHANGE 4: Rewrite initTeacher — lookup by id, use ensureTeacherProfile
 async function initTeacher(email, userId) {
-  let creationError=null;
   try {
-    const rows = await sbFetch(`teachers?email=eq.${encodeURIComponent(email)}&limit=1`);
-    if (rows && rows.length) {
-      APP.teacherId = rows[0].id; APP.teacherData = rows[0];
-    } else {
+    // Look up teacher row by ID (auth user UUID)
+    let rows = await sbFetch(`teachers?id=eq.${userId}&limit=1`);
+    let teacherRow = rows && rows.length ? rows[0] : null;
+
+    if (!teacherRow) {
+      // Self-heal: call ensureTeacherProfile with user's email prefix as name
       try {
-        const nr = await sbFetch('teachers', {method:'POST', body:JSON.stringify({
-          id:userId, email, full_name:email.split('@')[0], school_name:'G.S APAPEC MURAMBI',
-          subject:'', role:'teacher', teacher_code:'TC'+Date.now()
-        })});
-        APP.teacherId = nr[0]?.id || userId; APP.teacherData = nr[0]||{};
-      } catch(e) {
-        creationError=e.message||'Could not create teacher profile';
-        APP.teacherId=userId; APP.teacherData={id:userId,email,full_name:email.split('@')[0]};
-      }
-    }
-    // VERIFY: confirm a real row now exists in `teachers` for this id before allowing entry.
-    // Without this, classes/students/everything will fail later with a confusing foreign-key error.
-    try {
-      const verify = await sbFetch(`teachers?id=eq.${APP.teacherId}&limit=1`);
-      if (!verify || !verify.length) {
-        showMsg('loginErr', creationError
-          ? `Could not set up your teacher profile (${creationError}). Check the "teachers" table's Row Level Security policies in Supabase — authenticated users must be allowed to INSERT their own row.`
-          : 'Your teacher profile could not be verified. Please check Supabase RLS policies on the "teachers" table and try again.');
-        APP.token=null; APP.teacherId=null;
+        const namePart = email.split('@')[0];
+        teacherRow = await ensureTeacherProfile(namePart, null, null);
+        if (!teacherRow) throw new Error('ensureTeacherProfile returned empty');
+      } catch (e) {
+        showMsg('loginErr', `Your teacher profile could not be created. Please run the master SQL file in Supabase and try again. (${e.message})`);
+        APP.token = null;
+        APP.teacherId = null;
         return false;
       }
-    } catch(e) {
-      showMsg('loginErr','Could not verify teacher profile: '+e.message);
-      APP.token=null; APP.teacherId=null;
+    }
+
+    // Verify again (just to be safe)
+    if (!teacherRow || !teacherRow.id) {
+      showMsg('loginErr', 'Teacher profile verification failed. Please check database.');
+      APP.token = null;
+      APP.teacherId = null;
       return false;
     }
+
+    APP.teacherId = teacherRow.id;
+    APP.teacherData = teacherRow;
+
     // Load user_settings
     try {
       const us = await sbFetch(`user_settings?teacher_id=eq.${APP.teacherId}&limit=1`);
       if (us && us.length && us[0].theme) applyTheme(us[0].theme);
       if (us && us.length && us[0].school_name) APP.teacherData.school_name = us[0].school_name;
     } catch {}
-  } catch(e) {
-    showMsg('loginErr','Sign-in failed while loading your profile: '+e.message);
-    APP.token=null; APP.teacherId=null;
+
+    const tname = APP.teacherData?.full_name || email.split('@')[0];
+    updateSbProfile(tname, email);
+    persistSession(email, tname);
+    checkDBConnection();
+    showApp();
+    toast(`Welcome back, ${tname.split(' ')[0]}!`, 'success');
+    loadNotifications();
+    return true;
+  } catch (e) {
+    showMsg('loginErr', 'Sign-in failed while loading your profile: ' + e.message);
+    APP.token = null;
+    APP.teacherId = null;
     return false;
   }
-  const tname = APP.teacherData?.full_name || email.split('@')[0];
-  updateSbProfile(tname, email);
-  persistSession(email, tname);
-  checkDBConnection();
-  showApp();
-  toast(`Welcome back, ${tname.split(' ')[0]}!`, 'success');
-  loadNotifications();
-  return true;
 }
 
+// CHANGE 5: Rewrite doSignup — remove manual INSERT, use ensureTeacherProfile if auto-confirm
 async function doSignup() {
   const name=$i('sigName').value.trim(), email=$i('sigEmail').value.trim(),
         school=$i('sigSchool').value.trim(), subject=$i('sigSubject').value.trim(),
@@ -1297,12 +1337,16 @@ async function doSignup() {
     const data = await sbAuth('signup', {email, password:pass});
     if (data.id || data.user?.id) {
       const uid = (data.user||data).id;
-      try {
-        await sbFetch('teachers', {method:'POST', body:JSON.stringify({
-          id:uid, email, full_name:name, school_name:school||'G.S APAPEC MURAMBI',
-          subject, role:'teacher', teacher_code:'TC'+Date.now()
-        })});
-      } catch {}
+      // If auto-confirm is enabled, we get a session immediately
+      if (data.session && data.session.access_token) {
+        APP.token = data.session.access_token;
+        try {
+          await ensureTeacherProfile(name, school, subject);
+        } catch (e) {
+          // profile creation may have already happened via trigger; ignore errors
+        }
+        APP.token = null; // clear so user must login
+      }
       const ok=$i('signupOk');
       ok.textContent='✓ Account created! Check your email to verify your address, then sign in.';
       ok.style.display='block';
@@ -1347,22 +1391,49 @@ $i('signupBtn').addEventListener('click', doSignup);
 $i('loginPass').addEventListener('keypress', e=>{ if(e.key==='Enter') doLogin(); });
 $i('logoutBtn').addEventListener('click', ()=>{ clearSession(); showLogin(); });
 
-// Auto-login
+// CHANGE 6: Rewrite auto-login IIFE
 (async()=>{
   const tok=localStorage.getItem('sc_token'), email=localStorage.getItem('sc_email'),
         tid=localStorage.getItem('sc_tid'), tname=localStorage.getItem('sc_tname');
-  if (tok && email && tid) {
-    APP.token=tok; APP.teacherId=tid;
-    APP.teacherData={id:tid,full_name:tname||email};
-    updateSbProfile(tname||email.split('@')[0], email);
-    showApp();
-    // Re-fetch teacher data in background
-    try {
-      const rows = await sbFetch(`teachers?id=eq.${tid}&limit=1`);
-      if (rows && rows.length) { APP.teacherData=rows[0]; updateSbProfile(rows[0].full_name, email); localStorage.setItem('sc_tname',rows[0].full_name); }
-    } catch {}
-    loadNotifications();
-    checkDBConnection();
+  if (!tok || !email || !tid) return; // stay on login
+
+  APP.token = tok;
+  APP.teacherId = tid;
+  let ok = false;
+  try {
+    // Look up teacher by id
+    let rows = await sbFetch(`teachers?id=eq.${tid}&limit=1`);
+    let teacherRow = rows && rows.length ? rows[0] : null;
+    if (!teacherRow) {
+      // Self-heal
+      const namePart = tname || email.split('@')[0];
+      teacherRow = await ensureTeacherProfile(namePart, null, null);
+      if (!teacherRow) throw new Error('Failed to self-heal');
+    }
+    if (teacherRow && teacherRow.id) {
+      APP.teacherData = teacherRow;
+      APP.teacherId = teacherRow.id;
+      updateSbProfile(teacherRow.full_name || tname, email);
+      persistSession(email, teacherRow.full_name || tname);
+      ok = true;
+      showApp();
+      toast(`Welcome back, ${(teacherRow.full_name||tname).split(' ')[0]}!`, 'success');
+      loadNotifications();
+      checkDBConnection();
+    } else {
+      throw new Error('No teacher row');
+    }
+  } catch (e) {
+    // If anything fails, clear session and stay on login
+    console.warn('Auto-login failed:', e);
+    clearSession();
+    showLogin();
+    toast('Session expired. Please sign in again.', 'warn');
+  }
+  if (!ok) {
+    // fallback
+    clearSession();
+    showLogin();
   }
 })();
 
@@ -1594,19 +1665,67 @@ function resetFilter() { APP.filter=null; APP.dispStudents=[...APP.allStudents];
 
 /* CREATE CLASS */
 $i('newClassBtn').addEventListener('click',()=>openModal('m-newClass'));
+
+// CHANGE 8: Update "Create Class" button handler to use createClassSafe
 $i('saveClassBtn').addEventListener('click',async()=>{
   const name=$i('m-className').value.trim(), year=$i('m-classYear').value.trim(), term=parseInt($i('m-classTerm').value);
   if (!name) { toast('Class name is required','warn'); return; }
   setBtn('saveClassBtn',true,'Creating…');
   try {
-    await sbFetch('classes',{method:'POST',body:JSON.stringify({class_name:name,academic_year:year,term,teacher_id:APP.teacherId,description:''})});
+    const payload = {
+      class_name: name,
+      academic_year: year,
+      term,
+      teacher_id: APP.teacherId,
+      description: ''
+    };
+    await createClassSafe(payload);
     closeModal('m-newClass'); $i('m-className').value='';
     await renderClasses();
     toast('Class created','success');
     createNotification('New Class Created',`Class "${name}" has been created.`,'success','classes');
-  } catch(e) { toast('Error: '+e.message,'error'); }
-  finally { setBtn('saveClassBtn',false,'<i class="fas fa-check"></i> Create Class'); }
+  } catch(e) {
+    toast('Error: '+e.message,'error');
+  } finally {
+    setBtn('saveClassBtn',false,'<i class="fas fa-check"></i> Create Class');
+  }
 });
+
+// CHANGE 7: Add createClassSafe function
+async function createClassSafe(payload) {
+  try {
+    // First attempt
+    return await sbFetch('classes', { method: 'POST', body: JSON.stringify(payload) });
+  } catch (e) {
+    // Check if it's a foreign-key violation (23503) or mentions teacher_id
+    if (e.code === '23503' || (e.message && (e.message.includes('foreign key') || e.message.includes('teacher_id')))) {
+      toast('Repairing teacher profile…', 'info', 2000);
+      // Attempt to repair
+      const name = APP.teacherData?.full_name || (localStorage.getItem('sc_tname') || '');
+      const school = APP.teacherData?.school_name || '';
+      const subject = APP.teacherData?.subject || '';
+      try {
+        const teacherRow = await ensureTeacherProfile(name, school, subject);
+        if (teacherRow && teacherRow.id) {
+          APP.teacherId = teacherRow.id;
+          APP.teacherData = teacherRow;
+          payload.teacher_id = teacherRow.id;
+          // Retry once
+          return await sbFetch('classes', { method: 'POST', body: JSON.stringify(payload) });
+        } else {
+          throw new Error('Profile repair failed');
+        }
+      } catch (repairErr) {
+        const msg = 'Could not repair teacher profile. Please sign out and sign in again.';
+        toast(msg, 'error');
+        throw new Error(msg + ' (' + repairErr.message + ')');
+      }
+    } else {
+      // Re-throw any other error
+      throw e;
+    }
+  }
+}
 
 /* ADD STUDENT */
 $i('addStudentBtn').addEventListener('click',()=>{
